@@ -26,6 +26,7 @@ import (
 	"github.com/virtual-kubelet/virtual-kubelet/errdefs"
 	"github.com/virtual-kubelet/virtual-kubelet/internal/manager"
 	"github.com/virtual-kubelet/virtual-kubelet/log"
+	"github.com/virtual-kubelet/virtual-kubelet/node/env"
 	"github.com/virtual-kubelet/virtual-kubelet/trace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -129,6 +130,12 @@ type PodController struct {
 	// This is used since `pc.Run()` is typically called in a goroutine and managing
 	// this can be non-trivial for callers.
 	err error
+
+	// Function that gets called to resolve environment variable references in
+	// the pod.  Defaults to env.PopulateEnvironmentVariables
+	envResolver env.ResolverFunc
+
+	envResolverConfig env.ResolverConfig
 }
 
 type knownPod struct {
@@ -163,6 +170,7 @@ type PodControllerConfig struct {
 
 	// RateLimiter defines the rate limit of work queue
 	RateLimiter workqueue.RateLimiter
+	EnvResolver env.ResolverFunc
 }
 
 // NewPodController creates a new pod controller with the provided config.
@@ -191,23 +199,34 @@ func NewPodController(cfg PodControllerConfig) (*PodController, error) {
 	if cfg.RateLimiter == nil {
 		cfg.RateLimiter = workqueue.DefaultControllerRateLimiter()
 	}
+	if cfg.EnvResolver == nil {
+		cfg.EnvResolver = env.PopulateEnvironmentVariables
+	}
 	rm, err := manager.NewResourceManager(cfg.PodInformer.Lister(), cfg.SecretInformer.Lister(), cfg.ConfigMapInformer.Lister(), cfg.ServiceInformer.Lister())
 	if err != nil {
 		return nil, pkgerrors.Wrap(err, "could not create resource manager")
 	}
 
+	erc := env.ResolverConfig{
+		ConfigMapLister: cfg.ConfigMapInformer.Lister(),
+		SecretLister:    cfg.SecretInformer.Lister(),
+		ServiceLister:   cfg.ServiceInformer.Lister(),
+	}
+
 	pc := &PodController{
-		client:          cfg.PodClient,
-		podsInformer:    cfg.PodInformer,
-		podsLister:      cfg.PodInformer.Lister(),
-		provider:        cfg.Provider,
-		resourceManager: rm,
-		ready:           make(chan struct{}),
-		done:            make(chan struct{}),
-		recorder:        cfg.EventRecorder,
-		k8sQ:            workqueue.NewNamedRateLimitingQueue(cfg.RateLimiter, "syncPodsFromKubernetes"),
-		deletionQ:       workqueue.NewNamedRateLimitingQueue(cfg.RateLimiter, "deletePodsFromKubernetes"),
-		podStatusQ:      workqueue.NewNamedRateLimitingQueue(cfg.RateLimiter, "syncPodStatusFromProvider"),
+		client:            cfg.PodClient,
+		podsInformer:      cfg.PodInformer,
+		podsLister:        cfg.PodInformer.Lister(),
+		provider:          cfg.Provider,
+		resourceManager:   rm,
+		ready:             make(chan struct{}),
+		done:              make(chan struct{}),
+		recorder:          cfg.EventRecorder,
+		k8sQ:              workqueue.NewNamedRateLimitingQueue(cfg.RateLimiter, "syncPodsFromKubernetes"),
+		deletionQ:         workqueue.NewNamedRateLimitingQueue(cfg.RateLimiter, "deletePodsFromKubernetes"),
+		podStatusQ:        workqueue.NewNamedRateLimitingQueue(cfg.RateLimiter, "syncPodStatusFromProvider"),
+		envResolver:       cfg.EnvResolver,
+		envResolverConfig: erc,
 	}
 
 	return pc, nil
